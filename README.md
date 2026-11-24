@@ -158,22 +158,136 @@ unifmem2.cu is identical, with the two memset lines removed:
     memset(gpuRef, 0, nBytes);
 ```
 
+```cuda
+    %%writefile unifmem2.cu
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <cuda_runtime.h>
+#include <sys/time.h>
+
+#define CHECK(call) { const cudaError_t e = call; if (e != cudaSuccess) { fprintf(stderr, "Error: %s:%d, code: %d, reason: %s\n", __FILE__, __LINE__, e, cudaGetErrorString(e)); exit(1); } }
+
+inline double seconds()
+{
+    struct timeval tp;
+    gettimeofday(&tp, NULL);
+    return (double)tp.tv_sec + (double)tp.tv_usec * 1.e-6;
+}
+
+void initialData(float *ip, const int size)
+{
+    for (int i = 0; i < size; i++) ip[i] = (float)(rand() & 0xFF) / 10.0f;
+}
+
+void sumMatrixOnHost(float *A, float *B, float *C, const int nx, const int ny)
+{
+    for (int iy = 0; iy < ny; iy++)
+        for (int ix = 0; ix < nx; ix++)
+            C[iy * nx + ix] = A[iy * nx + ix] + B[iy * nx + ix];
+}
+
+void checkResult(float *h, float *g, const int N)
+{
+    for (int i = 0; i < N; i++)
+    {
+        if (fabs(h[i] - g[i]) > 1.0E-8)
+        {
+            printf("host %f gpu %f\nArrays do not match.\n\n", h[i], g[i]);
+            return;
+        }
+    }
+    printf("Arrays match.\n");
+}
+
+__global__ void sumMatrixGPU(float *a, float *b, float *c, int nx, int ny)
+{
+    unsigned int ix = threadIdx.x + blockIdx.x * blockDim.x;
+    unsigned int iy = threadIdx.y + blockIdx.y * blockDim.y;
+    if (ix < nx && iy < ny)
+    {
+        unsigned int idx = iy * nx + ix;
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+int main(int argc, char **argv)
+{
+    printf("%s Starting ", argv[0]);
+    int dev = 0;
+    cudaDeviceProp p;
+    CHECK(cudaGetDeviceProperties(&p, dev));
+    printf("using Device %d: %s\n", dev, p.name);
+    CHECK(cudaSetDevice(dev));
+
+    int ishift = 12;
+    if (argc > 1) ishift = atoi(argv[1]);
+    int nx = 1 << ishift, ny = nx;
+    int nxy = nx * ny;
+    int nBytes = nxy * sizeof(float);
+    printf("Matrix size: nx %d ny %d\n", nx, ny);
+
+    float *A, *B, *hostRef, *gpuRef;
+    CHECK(cudaMallocManaged((void **)&A, nBytes));
+    CHECK(cudaMallocManaged((void **)&B, nBytes));
+    CHECK(cudaMallocManaged((void **)&gpuRef, nBytes));
+    CHECK(cudaMallocManaged((void **)&hostRef, nBytes));
+
+    double t = seconds();
+    initialData(A, nxy);
+    initialData(B, nxy);
+    printf("initialization: \t %f sec\n", seconds() - t);
+
+
+    t = seconds();
+    sumMatrixOnHost(A, B, hostRef, nx, ny);
+    printf("sumMatrix on host:\t %f sec\n", seconds() - t);
+
+    dim3 block(32, 32);
+    dim3 grid((nx + block.x - 1) / block.x, (ny + block.y - 1) / block.y);
+
+    sumMatrixGPU<<<grid, block>>>(A, B, gpuRef, 1, 1);
+    CHECK(cudaDeviceSynchronize());
+
+    t = seconds();
+    sumMatrixGPU<<<grid, block>>>(A, B, gpuRef, nx, ny);
+    CHECK(cudaDeviceSynchronize());
+    printf("sumMatrix on gpu :\t %f sec <<<(%d,%d), (%d,%d)>>>\n", seconds() - t, grid.x, grid.y, block.x, block.y);
+
+    CHECK(cudaGetLastError());
+    checkResult(hostRef, gpuRef, nxy);
+
+    CHECK(cudaFree(A));
+    CHECK(cudaFree(B));
+    CHECK(cudaFree(hostRef));
+    CHECK(cudaFree(gpuRef));
+    CHECK(cudaDeviceReset());
+    return 0;
+}
+```
+
 ## OUTPUT:
 unifmem1 (with memsets):
 
-![unifmem1 output](unifmem1_output.png)
+<img width="586" height="200" alt="image" src="https://github.com/user-attachments/assets/9269672a-55c9-46b0-98c1-2b3f8d94d763" />
+
 
 unifmem2 (without memsets):
 
-![unifmem2 output](unifmem2_output.png)
+<img width="586" height="200" alt="image" src="https://github.com/user-attachments/assets/7148572d-0b7d-4f79-bac5-febde9cef496" />
+
 
 nsys profile (kernel summary, unifmem1 then unifmem2):
 
-![nsys kernel](nsys_kernel.png)
+<img width="1128" height="93" alt="image" src="https://github.com/user-attachments/assets/2b346b3c-06a1-4586-9d7d-37b7ecf70d30" />
+
 
 nsys unified memory migration (unifmem1):
 
-![nsys unified memory](nsys_unified_mem.png)
+<img width="1625" height="200" alt="image" src="https://github.com/user-attachments/assets/6bbd7de0-ae82-43dc-a36c-696d3d8f1d4b" />
+
+
 
 ## RESULT:
 Thus the program has been executed by using unified memory. It is observed that removing memset function has given less time (GPU 0.046045 sec without memsets vs 0.072478 sec with memsets).
